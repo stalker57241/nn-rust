@@ -6,7 +6,6 @@ readme = "README.md"
 license = "MIT"
 description = "Rust library for neural network creation"
 repository = "https://github.com/stalker57241/nn-rust"
-authors = ["stalker57241 <stalker3204@yandex.ru>"]
 keywords = ["neural-network", "feed-forward"]
 categories = ["artificial-intelligence"]
 exclude = ["/mnist"]
