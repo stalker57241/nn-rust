@@ -31,12 +31,12 @@ MNIST, конфигурация [784, 192, 96, 10], 350 эпох:
 ## Структура
 
 - src/ — библиотека (neuro.rs, main.rs)
-- mnist/ — данные и загрузчик формата IDX
+- mnist/ — данные формата IDX
 - Cargo.toml — зависимости (только rand)
 
 ## Запуск
 
-Нужен Rust toolchain. Скачай MNIST в mnist/:
+Данные для проверки MNIST уже загружены в папку [`mnist/`](https://github.com/stalker57241/nn-rust/tree/general/mnist)
 
 - train-images-idx3-ubyte
 - train-labels-idx1-ubyte
@@ -49,24 +49,31 @@ MNIST, конфигурация [784, 192, 96, 10], 350 эпох:
 cargo run --release
 ```
 
-Для скорости обязательно --release, иначе обучение в разы медленнее. В Cargo.toml включены lto и codegen-units = 1.
+Для высокой скорости обучения обязательна сборка и запуск --release, иначе обучение в разы медленнее. В Cargo.toml включены lto и codegen-units = 1.
+
+Только сборка:
+```bash
+cargo build --release
+```
 
 ## Что внутри
 
-- NeuralNetwork — веса, bias, конфигурация слоёв, learning rate
-- NeuralNetworkInternal — активации и предактивации по слоям для backprop
-- FeedForward, FeedForwardInternal, FeedForwardRaw — трейты интерфейса
-- Act — обёртка над парой функций (активация, производная)
-- Randomf32 — инициализатор весов из диапазона
+- `NeuralNetwork` — веса, смещения, конфигурация слоёв, learning rate
+- `NeuralNetworkInternal` — активации по слоям для обучения backpropogation
+- `FeedForward`, `FeedForwardInternal`, `FeedForwardRaw` — трейты интерфейса для возможности настроить собственное обучение
+- `Act` — обёртка для хранения функций (активация, производная)
+  - Пример использования: сигмоида `static SIGMOID: Act = (|x| 1.0 / (1.0 + (-x).exp(), |x| x * (1.0 - x));`
+- `Randomf32` — генератор случайных чисел. Используется для создания весов из указанного диапазона:
+  - `Randomf32::0` - нижний порог
+  - `Randomf32::1` - верхний порог
 
 ## Планы
 
 - Softmax + cross-entropy для классификации
 - Разные функции активации на разные слои (ReLU, tanh)
-- Батчи вместо онлайн-обучения
-- L2-регуляризация, dropout
 - Сохранение и загрузка весов
 - Оптимизация: переиспользование буферов, flatten весов
 
 ## Лицензия
 
+[`MIT`](https://github.com/stalker57241/nn-rust/blob/general/LICENSE)
