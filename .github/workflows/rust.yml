@@ -3,8 +3,18 @@ name: Rust
 on:
   push:
     branches: [ "general" ]
+    paths-ignore: 
+      - "/.md"
+      - "docs/"
+      - "LICENSE"
+      - ".gitignore"
   pull_request:
     branches: [ "general" ]
+    paths-ignore: 
+      - "/.md"
+      - "docs/"
+      - "LICENSE"
+      - ".gitignore"
 
 env:
   CARGO_TERM_COLOR: always
