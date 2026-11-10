@@ -1,5 +1,5 @@
 [package]
-name = "nn"
+name = "nn320"
 version = "0.1.0"
 edition = "2024"
 readme = "README.md"
@@ -10,6 +10,9 @@ keywords = ["neural-network", "feed-forward"]
 categories = ["artificial-intelligence"]
 exclude = ["/mnist"]
 publish = false # For now
+
+[lib]
+crate-type = ["cdylib"]
 
 [profile.release]
 opt-level = 3
