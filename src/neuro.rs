@@ -23,7 +23,7 @@ pub fn rand() -> f32 {
 	}
 }
 pub trait LayerConfig {
-	fn get_layer_config(&self) -> &[usize];
+	fn get_layer_config(&self) -> Vec<usize>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -32,16 +32,16 @@ pub enum LossType {
 	Square,
 	CrossEntropy,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NeuralNetwork {
 	/// Indexation is next: [layer][out + in * outs]
 	pub(crate) weightmats: Vec<WeightMatrix<f32>>,
 	pub(crate) biases: Vec<Vec<f32>>,
 	pub(crate) layerconfig: Vec<usize>,
 	pub(crate) learnrate: f32,
+}
+pub struct NeuralNetworkActivations {
 	pub(crate) acts: Vec<Box<dyn Activation>>,
-	pub(crate) deltas: Vec<Vec<f32>>,
-	pub gradients: NeuralNetworkGradients,
 }
 impl Default for NeuralNetwork {
 	fn default() -> Self {
@@ -49,10 +49,7 @@ impl Default for NeuralNetwork {
 			weightmats: vec![],
 			biases: vec![],
 			layerconfig: vec![],
-			learnrate: 0f32, 
-			acts: vec![], 
-			deltas: vec![], 
-			gradients: NeuralNetworkGradients::default() 
+			learnrate: 0f32,
 		}
 	}
 }
@@ -70,17 +67,46 @@ pub struct NeuralNetworkInternal {
 	/// Indexation is next: [layer][out]
 	layers: Vec<Vec<f32>>
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NeuralNetworkGradients {
 	weightmats: Vec<WeightMatrix<f32>>,
 	biases: Vec<Vec<f32>>,
 	pub count: usize,
+}
+impl NeuralNetworkGradients {
+	pub fn new(layerconfig: Vec<usize>) -> Self {
+
+		let mut gradients = NeuralNetworkGradients {
+			weightmats: vec![],
+			biases: vec![],
+			count: 0
+		};
+		for idx in 1..layerconfig.len() {
+			let inputs = layerconfig[idx - 1];
+			let outputs = layerconfig[idx];
+			gradients.weightmats.push(vec![0f32;inputs * outputs]);
+			gradients.biases.push(vec![0f32;outputs]);
+		}
+		return gradients;
+	}
+	pub fn add_assign(&mut self, rhs: &Self) {
+		self.count += rhs.count;
+		for i in 0..self.weightmats.len() {
+			for j in 0..self.weightmats[i].len() {
+				self.weightmats[i][j] += rhs.weightmats[i][j];
+			}
+			for j in 0..self.biases[i].len() {
+				self.biases[i][j] += rhs.biases[i][j];
+			}
+		}
+	}
 }
 impl Default for NeuralNetworkGradients {
 	fn default() -> Self {
 		return NeuralNetworkGradients { weightmats: vec![], biases: vec![], count: 0 };
 	}
 }
+
 pub trait Generator<T: Clone> {
 	fn rand(&self) -> T;
 }
@@ -101,36 +127,20 @@ impl<T: Clone + Copy + PartialOrd + SampleUniform> Generator<T> for Random<T> {
 		return rand::random_range(self.0..self.1);
 	}
 }
-impl NeuralNetwork {
-	pub fn get_loss(&self) -> LossType {
-		return self.acts.last().expect("Last layer is magically was empty").get_loss_type();
+pub trait GetLoss {
+	fn get_loss(&self) -> LossType;
+}
+impl GetLoss for Vec<Box<dyn Activation>> {
+	fn get_loss(&self) -> LossType {
+		return self.last().expect("Last layer is magically was empty").get_loss_type().clone();
 	}
+}
+impl NeuralNetwork {
 	pub fn get_learnrate(&mut self) -> f32 {
 		self.learnrate
 	}
 	pub fn set_learnrate(&mut self, learnrate: f32) {
 		self.learnrate = learnrate;
-	}
-	pub fn zero_deltas(layerconfig: &Vec<usize>) -> Vec<Vec<f32>> {
-		let mut deltas = vec![];
-		for weightmatidx in 0..layerconfig.len() - 1 {
-			deltas.push(vec![0.0f32;layerconfig[weightmatidx + 1]]);
-		}
-		return deltas;
-	}
-	pub fn zero_gradients(layerconfig: &Vec<usize>) -> NeuralNetworkGradients {
-		let mut gradients = NeuralNetworkGradients {
-			weightmats: vec![],
-			biases: vec![],
-			count: 0
-		};
-		for idx in 1..layerconfig.len() {
-			let inputs = layerconfig[idx - 1];
-			let outputs = layerconfig[idx];
-			gradients.weightmats.push(vec![0f32;inputs * outputs]);
-			gradients.biases.push(vec![0f32;outputs]);
-		}
-		return gradients;
 	}
 	fn generate_layers(layerconfig: &Vec<usize>) -> (Vec<WeightMatrix<f32>>, Vec<Vec<f32>>) {
 		let mut weights = vec![];
@@ -147,18 +157,20 @@ impl NeuralNetwork {
 		}
 		return (weights, biases);
 	}
-	pub fn new(layerconfig: &Vec<usize>, learnrate: f32, acts: Vec<Box<dyn Activation>>) -> NeuralNetwork {
+	pub fn new(layerconfig: &Vec<usize>, learnrate: f32) -> NeuralNetwork {
 		let (weights, biases) = NeuralNetwork::generate_layers(layerconfig);
 		let network = NeuralNetwork {
 			weightmats: weights,
 			biases: biases,
 			layerconfig: layerconfig.clone(),
-			learnrate: learnrate,
-			acts: acts,
-			deltas: Self::zero_deltas(layerconfig),
-			gradients: Self::zero_gradients(layerconfig)
+			learnrate: learnrate
 		};
 		return network;
+	}
+	pub fn get_gradients(&self) -> NeuralNetworkGradients {
+		return NeuralNetworkGradients::new(
+			self.get_layer_config()
+		);
 	}
 }
 impl<> LossCost<f32> for Vec<f32> {
@@ -180,7 +192,7 @@ impl<> LossCost<f32> for Vec<f32> {
 	}
 }
 impl FeedForward<NeuralNetworkInternal> for NeuralNetwork {
-	fn forward_internal(&self, input: &[f32]) -> NeuralNetworkInternal {
+	fn forward_internal(&self, acts: &[Box<dyn Activation>], input: &[f32]) -> NeuralNetworkInternal {
 		let mut network: NeuralNetworkInternal = NeuralNetworkInternal { layers: vec![] };
 		let layer = &self.weightmats[0];
 		let inputs = input.len();
@@ -193,7 +205,7 @@ impl FeedForward<NeuralNetworkInternal> for NeuralNetwork {
 			// out[outidx] = self.acts.activate(sum);
 		}
 		network.layers.push(input.to_vec());
-		network.layers.push(self.acts[0].activate(&sums));
+		network.layers.push(acts[0].activate(&sums));
 		for layeridx in 1..self.get_layer_config().len()-1 {
 			// out + in * outs
 			let layer = &self.weightmats[layeridx];
@@ -207,13 +219,13 @@ impl FeedForward<NeuralNetworkInternal> for NeuralNetwork {
 						sums[outidx].add_assign(layer[outidx + inidx * outputs] * network.layers[layeridx][inidx])
 					);
 			}
-			network.layers.push(self.acts[layeridx].activate(&sums));
+			network.layers.push(acts[layeridx].activate(&sums));
 			// println!("forward_internal: network.layers.len(): {}", network.layers.len());
 		}
 		network
 	}
 
-	fn forward(&self, input: &[f32]) -> Vec<f32> {
+	fn forward(&self, acts: &[Box<dyn Activation>], input: &[f32]) -> Vec<f32> {
 		let mut last = input.to_vec().clone();
 		for layeridx in 0..self.get_layer_config().len()-1 {
 			// in + out * ins
@@ -227,34 +239,33 @@ impl FeedForward<NeuralNetworkInternal> for NeuralNetwork {
 				// 	sums[outidx].add_assign(layer[outidx + inidx * outputs] * last[inidx]);
 				// }
 			}
-			last = self.acts[layeridx].activate(&sums);
+			last = acts[layeridx].activate(&sums);
 		}
 		return last;
 	}
 }
 
-// impl NeuralNetwork {
-// 	fn partialbackprop(&mut self, weights: &Vec<f32>, inputs: usize, outputs: usize) {}
-// }
-
-impl BackPropogation<NeuralNetworkInternal> for NeuralNetwork {
-	fn backpropogation(&mut self, input: &[f32], expected: &[f32]) -> Vec<f32> {
-		let internal = self.forward_internal(input);
+impl BackPropogation<NeuralNetworkInternal, NeuralNetworkGradients> for NeuralNetwork {
+	fn backpropogation(&self, activations: &[Box<dyn Activation>], input: &[f32], expected: &[f32]) -> (Vec<f32>, NeuralNetworkGradients) {
+		let mut gradients: NeuralNetworkGradients = NeuralNetworkGradients::new(self.get_layer_config());
+		let mut deltas: Vec<Vec<f32>> = self.layerconfig[1..]
+			.iter()
+			.map(|&n| vec![0.0; n])
+			.collect();
+		let internal = self.forward_internal(activations, input);
 		let weightmatcount = self.weightmats.len();
 		let mut derivs: Vec<f32>;
 		// #1 Last layer
 		let weightmatlast = weightmatcount - 1;
-		let acts = self.acts[weightmatlast].activate(&internal.layers[weightmatcount]);
-		if !self.acts[weightmatlast].vector_derivate(&acts, expected, &mut self.deltas[weightmatlast]) {
+		let acts = activations[weightmatlast].activate(&internal.layers[weightmatcount]);
+		if !activations[weightmatlast].vector_derivate(&acts, expected, &mut deltas[weightmatlast]) {
 			derivs = vec![0f32;internal.layers[weightmatlast].len()];
-			// println!("acts: {} == int: {} == deriv: {} == expected: {}", acts.len(), internal.layers[weightmatlast].len(), derivs.len(), expected.len());
-			// println!("internal.layers[{weightmatcount}].len(): {}", internal.layers[weightmatcount].len());
-			self.acts[weightmatlast].derivate( &internal.layers[weightmatcount], &mut derivs);
+			activations[weightmatlast].derivate( &internal.layers[weightmatcount], &mut derivs);
 			for outidx in 0..internal.layers[weightmatcount].len() {
 				let error = internal.layers[weightmatcount][outidx] - expected[outidx];
-				match self.acts[weightmatlast].get_loss_type() {
-					LossType::Square => self.deltas[weightmatlast][outidx] = error * derivs[outidx],
-					LossType::CrossEntropy => self.deltas[weightmatlast][outidx] = error,
+				match activations[weightmatlast].get_loss_type() {
+					LossType::Square => deltas[weightmatlast][outidx] = error * derivs[outidx],
+					LossType::CrossEntropy => deltas[weightmatlast][outidx] = error,
 				}
 			}
 		}
@@ -264,23 +275,23 @@ impl BackPropogation<NeuralNetworkInternal> for NeuralNetwork {
 			let inputs = self.get_layer_config()[layeridx + 1]; 
 			let outputs = self.get_layer_config()[layeridx + 2];
 			derivs = vec![0f32;internal.layers[layeridx + 1].len()];
-			self.acts[layeridx].derivate(&internal.layers[layeridx + 1], &mut derivs);
+			activations[layeridx].derivate(&internal.layers[layeridx + 1], &mut derivs);
 			for inidx in 0..inputs {
 				let mut sum = 0.0f32;
 				for outidx in 0..outputs {
-					sum += weights[outidx + inidx * outputs] * self.deltas[layeridx+1][outidx];
+					sum += weights[outidx + inidx * outputs] * deltas[layeridx+1][outidx];
 				}
-				self.deltas[layeridx][inidx] = sum * derivs[inidx];
+				deltas[layeridx][inidx] = sum * derivs[inidx];
 			}
 		}
 		// #3 update gradient
 		for weightmatidx in 0..weightmatcount {
 			let inputs = self.get_layer_config()[weightmatidx];
 			let outputs = self.get_layer_config()[weightmatidx + 1];
-			let weights = &mut self.gradients.weightmats[weightmatidx];
-			let biases = &mut self.gradients.biases[weightmatidx];
+			let weights = &mut gradients.weightmats[weightmatidx];
+			let biases = &mut gradients.biases[weightmatidx];
 			let last_values = &internal.layers[weightmatidx];
-			let current_deltas = &self.deltas[weightmatidx];
+			let current_deltas = &deltas[weightmatidx];
 
 			for outidx in 0..outputs {
 				for inidx in 0..inputs {
@@ -290,20 +301,20 @@ impl BackPropogation<NeuralNetworkInternal> for NeuralNetwork {
 				biases[outidx] += current_deltas[outidx];
 			}
 		}
-		self.gradients.count += 1;
+		gradients.count += 1;
 		let Some(v) = internal.layers.last() else {
-			return vec![];
+			return (vec![], gradients);
 		};
-		return v.clone();
+		return (v.clone(), gradients);
 	}
 	
-	fn update(&mut self) {
-		let max = self.gradients.count.max(1) as f32;
+	fn update(&mut self, gradients: &mut NeuralNetworkGradients) {
+		let max = gradients.count.max(1) as f32;
 		for weightmatidx in 0..self.weightmats.len() {
 			let weights = &mut self.weightmats[weightmatidx];
 			let biases = &mut self.biases[weightmatidx];
-			let gradient_weights = &mut self.gradients.weightmats[weightmatidx];
-			let gradient_biases = &mut self.gradients.biases[weightmatidx];
+			let gradient_weights = &mut gradients.weightmats[weightmatidx];
+			let gradient_biases = &mut gradients.biases[weightmatidx];
 			for idx in 0..weights.len() {
 				weights[idx] -= self.learnrate * (gradient_weights[idx] / max);
 				gradient_weights[idx] = 0f32;
@@ -313,12 +324,12 @@ impl BackPropogation<NeuralNetworkInternal> for NeuralNetwork {
 				gradient_biases[idx] = 0f32;
 			}
 		}
-		self.gradients.count = 0;
+		gradients.count = 0;
 	}
 }
 impl LayerConfig for NeuralNetwork {
-	fn get_layer_config(&self) -> &[usize] {
-		return &self.layerconfig;
+	fn get_layer_config(&self) -> Vec<usize> {
+		return self.layerconfig.clone();
 	}
 }
 
