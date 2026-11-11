@@ -1,5 +1,5 @@
 
-use std::{fmt::Debug, ops::AddAssign};
+use std::{fmt::Debug, ops::AddAssign, thread};
 
 use rand::distr::uniform::SampleUniform;
 pub use crate::ff::*;
@@ -194,51 +194,123 @@ impl<> LossCost<f32> for Vec<f32> {
 impl FeedForward<NeuralNetworkInternal> for NeuralNetwork {
 	fn forward_internal(&self, acts: &[Box<dyn Activation>], input: &[f32]) -> NeuralNetworkInternal {
 		let mut network: NeuralNetworkInternal = NeuralNetworkInternal { layers: vec![] };
-		let layer = &self.weightmats[0];
-		let inputs = input.len();
-		let outputs = self.get_layer_config()[1];
-		let mut sums: Vec<f32> = self.biases[0].clone();
-		for outidx in 0..outputs {
-			for inidx in 0..inputs {
-				sums[outidx].add_assign(layer[outidx + inidx * outputs] * input[inidx]);
-			}
-			// out[outidx] = self.acts.activate(sum);
+		// First layer
+		{
+			let layer = &self.weightmats[0];
+			let inputs = input.len();
+			let outputs = self.get_layer_config()[1];
+			let biases = &self.biases[0];
+			let n_threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+			let chunk_size = (outputs + n_threads - 1) / n_threads;
+
+			let mut sums = vec![0.0f32; outputs];
+			let input_ref = input;
+
+			thread::scope(|scope| {
+				let mut handles = Vec::new();
+	            for chunk_start in (0..outputs).step_by(chunk_size.max(1)) {
+            	    let chunk_end = (chunk_start + chunk_size).min(outputs);
+					handles.push(scope.spawn(move || {
+						let mut local = Vec::with_capacity(chunk_end - chunk_start);
+
+						for outidx in chunk_start..chunk_end {
+							let mut sum = biases[outidx];
+							for inidx in 0..inputs {
+								sum += layer[outidx + inidx * outputs] * input_ref[inidx];
+							}
+							local.push(sum);
+						}
+
+						return (chunk_start, local);
+					}));
+				}
+				for h in handles {
+					let (start, local) = h.join().unwrap();
+					sums[start .. start + local.len()].copy_from_slice(&local);
+				}
+			});
+			network.layers.push(input.to_vec());
+			network.layers.push(acts[0].activate(&sums));
 		}
-		network.layers.push(input.to_vec());
-		network.layers.push(acts[0].activate(&sums));
 		for layeridx in 1..self.get_layer_config().len()-1 {
 			// out + in * outs
 			let layer = &self.weightmats[layeridx];
 			let inputs = self.get_layer_config()[layeridx];
 			let outputs = self.get_layer_config()[layeridx + 1];
-			sums = self.biases[layeridx].clone();
-			for outidx in 0..outputs {
-				// println!("forward_internal: {outidx}/{outputs}: {0}", sums.len());
-				(0..inputs) 
-					.for_each(|inidx|
-						sums[outidx].add_assign(layer[outidx + inidx * outputs] * network.layers[layeridx][inidx])
-					);
-			}
+			let biases = &self.biases[layeridx];
+			let prev = &network.layers[layeridx];
+			let n_threads = thread::available_parallelism()
+				.map(|n| n.get())
+				.unwrap_or(4);
+			let chunk_size = (outputs + n_threads - 1) / n_threads;
+			let mut sums = vec![0.0f32; outputs];
+			
+			thread::scope(|scope| {
+				let mut handles = Vec::new();
+				for chunk_start in (0..outputs).step_by(chunk_size.max(1)) {
+					let chunk_end = (chunk_start + chunk_size).min(outputs);
+					handles.push(scope.spawn(move || {
+						let mut local = Vec::with_capacity(chunk_end - chunk_start);
+						for outidx in chunk_start..chunk_end {
+							let mut sum = biases[outidx];
+							for inidx in 0..inputs {
+								sum += layer[outidx + inidx * outputs] * prev[inidx];
+							}
+							local.push(sum);
+						}
+						return (chunk_start, local);
+					}));
+				}
+				for h in handles {
+					let (start, local) = h.join().unwrap();
+					sums[start..start + local.len()].copy_from_slice(&local);
+				}
+			});
 			network.layers.push(acts[layeridx].activate(&sums));
 			// println!("forward_internal: network.layers.len(): {}", network.layers.len());
 		}
-		network
+		return network;
 	}
 
 	fn forward(&self, acts: &[Box<dyn Activation>], input: &[f32]) -> Vec<f32> {
-		let mut last = input.to_vec().clone();
+		let mut last = input.to_vec();
+
 		for layeridx in 0..self.get_layer_config().len()-1 {
 			// in + out * ins
 			let layer = &self.weightmats[layeridx];
+			let biases = &self.biases[layeridx];
 			let inputs = self.get_layer_config()[layeridx];
 			let outputs = self.get_layer_config()[layeridx + 1];
-			let mut sums: Vec<f32> = self.biases[layeridx].clone();
-			for outidx in 0..outputs {
-				(0..inputs).for_each(|inidx| sums[outidx].add_assign(layer[outidx + inidx * outputs] * last[inidx]));
-				// for inidx in 0..inputs {
-				// 	sums[outidx].add_assign(layer[outidx + inidx * outputs] * last[inidx]);
-				// }
-			}
+			let last_ref = &last;
+			let n_threads = thread::available_parallelism()
+				.map(|n| n.get())
+				.unwrap_or(4);
+			let chunk_size = (outputs + n_threads - 1) / n_threads;
+			let mut sums = vec![0.0f32; outputs];
+			thread::scope(|scope| {
+				let mut handles = Vec::new();
+		        for chunk_start in (0..outputs).step_by(chunk_size.max(1)) {
+            		let chunk_end = (chunk_start + chunk_size).min(outputs);
+					
+					handles.push(scope.spawn(move || {
+             			let mut local = Vec::with_capacity(chunk_end - chunk_start);
+                		for outidx in chunk_start..chunk_end {
+							let mut sum = biases[outidx];
+
+							for inidx in 0..inputs {
+								sum += layer[outidx + inidx *outputs] * last_ref[inidx];
+							}
+
+							local.push(sum);
+						}
+						return (chunk_start, local);
+					}));
+				}
+				for handle in handles {
+					let (start, local) = handle.join().unwrap();
+					sums[start..start + local.len()].copy_from_slice(&local);
+				}
+			});
 			last = acts[layeridx].activate(&sums);
 		}
 		return last;
@@ -317,14 +389,11 @@ impl BackPropogation<NeuralNetworkInternal, NeuralNetworkGradients> for NeuralNe
 			let gradient_biases = &mut gradients.biases[weightmatidx];
 			for idx in 0..weights.len() {
 				weights[idx] -= self.learnrate * (gradient_weights[idx] / max);
-				gradient_weights[idx] = 0f32;
 			}
 			for idx in 0..biases.len() {
 				biases[idx] -= self.learnrate * (gradient_biases[idx] / max);
-				gradient_biases[idx] = 0f32;
 			}
 		}
-		gradients.count = 0;
 	}
 }
 impl LayerConfig for NeuralNetwork {
