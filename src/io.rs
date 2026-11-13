@@ -1,4 +1,4 @@
-use std::{fs::File, io::{self, Read, Write}, path::Path};
+use std::{fs::File, io::{self, Read, Write}, path::Path, sync::Arc};
 
 use crate::{ff::Activation, helper::{LEAKY_RELU, LINEAR, RELU, SIGMOID, SOFTMAX}, neuro::{LayerConfig, NeuralNetwork}};
 
@@ -10,8 +10,7 @@ pub trait IONeural<T> {
     fn load(filename: String) -> Result<T, io::Error>;
     fn load_activation(index: u8) -> Box<dyn Activation>;
 }
-pub type NeuralNetworkPair = (NeuralNetwork, Vec<Box<dyn Activation>>);
-impl IONeural<NeuralNetworkPair> for NeuralNetworkPair {
+impl IONeural<NeuralNetwork> for NeuralNetwork {
     fn load_activation(index: u8) -> Box<dyn Activation> {
         match index {
             1 => return Box::from(SIGMOID),
@@ -27,8 +26,8 @@ impl IONeural<NeuralNetworkPair> for NeuralNetworkPair {
         // [layers]
         // [acts]
         // [[weightmat][biases]]
-        let network = &self.0;
-        let acts = &self.1;
+        let network = &self;
+        let acts = &self.acts;
         let mut file = File::create(filename)?;
         file.write_all(&network.learnrate.to_le_bytes())?;
         file.write_all(&network.get_layer_config().len().to_le_bytes())?;
@@ -60,7 +59,7 @@ impl IONeural<NeuralNetworkPair> for NeuralNetworkPair {
         
         Ok(())
     }
-    fn load(filename: String) -> Result<NeuralNetworkPair, io::Error> {
+    fn load(filename: String) -> Result<NeuralNetwork, io::Error> {
         // lr
         // layers.len()
         // [layers]
@@ -87,6 +86,7 @@ impl IONeural<NeuralNetworkPair> for NeuralNetworkPair {
         }
         let mut weightmats: Vec<Vec<f32>> = vec![vec![];matrix_count];
         let mut biases: Vec<Vec<f32>> = vec![vec![];matrix_count];
+        let mut bias_modulations: Vec<f32> = vec![1.0f32; matrix_count];
         for matidx in 0..matrix_count {
             let nextmatidx = matidx + 1;
             let inputs = layers[matidx];
@@ -95,6 +95,7 @@ impl IONeural<NeuralNetworkPair> for NeuralNetworkPair {
             let biascount = outputs;
             weightmats[matidx] = vec![0f32;weightcount];
             biases[matidx] = vec![0f32;biascount];
+            bias_modulations[matidx] = 1.0f32;
             for widx in 0..weightcount {
                 file.read_exact(&mut f32_buf)?;
                 weightmats[matidx][widx] = f32::from_le_bytes(f32_buf);
@@ -103,14 +104,18 @@ impl IONeural<NeuralNetworkPair> for NeuralNetworkPair {
                 file.read_exact(&mut f32_buf)?;
                 biases[matidx][bidx] = f32::from_le_bytes(f32_buf);
             }
+            file.read_exact(&mut f32_buf)?;
+            bias_modulations[matidx] = f32::from_le_bytes(f32_buf);
         }
         let network = NeuralNetwork {
             layerconfig: layers.clone(),
             weightmats: weightmats,
             biases: biases,
-            learnrate: lr
+            bias_modulation: bias_modulations,
+            learnrate: lr,
+            acts: Arc::from(acts)
         };
-        Ok((network, acts))
+        Ok(network)
     }
     
     fn exists(filename: String) -> bool {

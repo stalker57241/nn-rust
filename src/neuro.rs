@@ -1,5 +1,5 @@
 
-use std::{fmt::Debug, ops::AddAssign, thread};
+use std::{fmt::Debug, ops::AddAssign, sync::Arc, thread};
 
 use rand::distr::uniform::SampleUniform;
 pub use crate::ff::*;
@@ -37,19 +37,20 @@ pub struct NeuralNetwork {
 	/// Indexation is next: [layer][out + in * outs]
 	pub(crate) weightmats: Vec<WeightMatrix<f32>>,
 	pub(crate) biases: Vec<Vec<f32>>,
+	pub(crate) bias_modulation: Vec<f32>,
 	pub(crate) layerconfig: Vec<usize>,
 	pub(crate) learnrate: f32,
-}
-pub struct NeuralNetworkActivations {
-	pub(crate) acts: Vec<Box<dyn Activation>>,
+	pub(crate) acts: Arc<Vec<Box<dyn Activation>>>
 }
 impl Default for NeuralNetwork {
 	fn default() -> Self {
 		return NeuralNetwork {
 			weightmats: vec![],
 			biases: vec![],
+			bias_modulation: vec![],
 			layerconfig: vec![],
 			learnrate: 0f32,
+			acts: Arc::new(vec![])
 		}
 	}
 }
@@ -130,9 +131,9 @@ impl<T: Clone + Copy + PartialOrd + SampleUniform> Generator<T> for Random<T> {
 pub trait GetLoss {
 	fn get_loss(&self) -> LossType;
 }
-impl GetLoss for Vec<Box<dyn Activation>> {
+impl GetLoss for NeuralNetwork {
 	fn get_loss(&self) -> LossType {
-		return self.last().expect("Last layer is magically was empty").get_loss_type().clone();
+		return self.acts.last().expect("Last layer is magically was empty").get_loss_type().clone();
 	}
 }
 impl NeuralNetwork {
@@ -157,13 +158,15 @@ impl NeuralNetwork {
 		}
 		return (weights, biases);
 	}
-	pub fn new(layerconfig: &Vec<usize>, learnrate: f32) -> NeuralNetwork {
+	pub fn new(acts: Vec<Box<dyn Activation>>, layerconfig: &Vec<usize>, learnrate: f32) -> NeuralNetwork {
 		let (weights, biases) = NeuralNetwork::generate_layers(layerconfig);
 		let network = NeuralNetwork {
 			weightmats: weights,
 			biases: biases,
+			bias_modulation: vec![1.0f32; layerconfig.len() - 1],
 			layerconfig: layerconfig.clone(),
-			learnrate: learnrate
+			learnrate: learnrate,
+			acts: Arc::from(acts)
 		};
 		return network;
 	}
@@ -192,150 +195,84 @@ impl<> LossCost<f32> for Vec<f32> {
 	}
 }
 impl FeedForward<NeuralNetworkInternal> for NeuralNetwork {
-	fn forward_internal(&self, acts: &[Box<dyn Activation>], input: &[f32]) -> NeuralNetworkInternal {
+	fn forward_internal(&self, input: &[f32]) -> NeuralNetworkInternal {
 		let mut network: NeuralNetworkInternal = NeuralNetworkInternal { layers: vec![] };
-		// First layer
-		{
-			let layer = &self.weightmats[0];
-			let inputs = input.len();
-			let outputs = self.get_layer_config()[1];
-			let biases = &self.biases[0];
-			let n_threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-			let chunk_size = (outputs + n_threads - 1) / n_threads;
-
-			let mut sums = vec![0.0f32; outputs];
-			let input_ref = input;
-
-			thread::scope(|scope| {
-				let mut handles = Vec::new();
-	            for chunk_start in (0..outputs).step_by(chunk_size.max(1)) {
-            	    let chunk_end = (chunk_start + chunk_size).min(outputs);
-					handles.push(scope.spawn(move || {
-						let mut local = Vec::with_capacity(chunk_end - chunk_start);
-
-						for outidx in chunk_start..chunk_end {
-							let mut sum = biases[outidx];
-							for inidx in 0..inputs {
-								sum += layer[outidx + inidx * outputs] * input_ref[inidx];
-							}
-							local.push(sum);
-						}
-
-						return (chunk_start, local);
-					}));
-				}
-				for h in handles {
-					let (start, local) = h.join().unwrap();
-					sums[start .. start + local.len()].copy_from_slice(&local);
-				}
-			});
-			network.layers.push(input.to_vec());
-			network.layers.push(acts[0].activate(&sums));
+		let layer = &self.weightmats[0];
+		let inputs = input.len();
+		let outputs = self.get_layer_config()[1];
+		let mut modulation: f32 = self.bias_modulation[0];
+		let mut sums: Vec<f32> = self.biases[0].iter().map(|x| x * modulation).collect();
+		for outidx in 0..outputs {
+			for inidx in 0..inputs {
+				sums[outidx].add_assign(layer[outidx + inidx * outputs] * input[inidx]);
+			}
+			// out[outidx] = self.acts.activate(sum);
 		}
+		network.layers.push(input.to_vec());
+		network.layers.push(self.acts[0].activate(&sums));
 		for layeridx in 1..self.get_layer_config().len()-1 {
 			// out + in * outs
 			let layer = &self.weightmats[layeridx];
-			let inputs = self.get_layer_config()[layeridx];
+			// let inputs = self.get_layer_config()[layeridx];
 			let outputs = self.get_layer_config()[layeridx + 1];
-			let biases = &self.biases[layeridx];
-			let prev = &network.layers[layeridx];
-			let n_threads = thread::available_parallelism()
-				.map(|n| n.get())
-				.unwrap_or(4);
-			let chunk_size = (outputs + n_threads - 1) / n_threads;
-			let mut sums = vec![0.0f32; outputs];
-			
-			thread::scope(|scope| {
-				let mut handles = Vec::new();
-				for chunk_start in (0..outputs).step_by(chunk_size.max(1)) {
-					let chunk_end = (chunk_start + chunk_size).min(outputs);
-					handles.push(scope.spawn(move || {
-						let mut local = Vec::with_capacity(chunk_end - chunk_start);
-						for outidx in chunk_start..chunk_end {
-							let mut sum = biases[outidx];
-							for inidx in 0..inputs {
-								sum += layer[outidx + inidx * outputs] * prev[inidx];
-							}
-							local.push(sum);
-						}
-						return (chunk_start, local);
-					}));
-				}
-				for h in handles {
-					let (start, local) = h.join().unwrap();
-					sums[start..start + local.len()].copy_from_slice(&local);
-				}
-			});
-			network.layers.push(acts[layeridx].activate(&sums));
+			modulation = self.bias_modulation[layeridx];
+			sums = self.biases[layeridx].iter().map(|x| x * modulation).collect();
+			for outidx in 0..outputs {
+				// println!("forward_internal: {outidx}/{outputs}: {0}", sums.len());
+				sums
+					.iter_mut()
+					.enumerate()
+					.for_each(|(inidx, value)|
+						value.add_assign(layer[outidx + inidx * outputs] * network.layers[layeridx][inidx]));
+				// (0..inputs).for_each(|inidx|sums[outidx].add_assign(layer[outidx + inidx * outputs] * network.layers[layeridx][inidx]));
+			}
+			network.layers.push(self.acts[layeridx].activate(&sums));
 			// println!("forward_internal: network.layers.len(): {}", network.layers.len());
 		}
-		return network;
+		network
 	}
-
-	fn forward(&self, acts: &[Box<dyn Activation>], input: &[f32]) -> Vec<f32> {
-		let mut last = input.to_vec();
-
+	fn forward(&self, input: &[f32]) -> Vec<f32> {
+		let mut last = input.to_vec().clone();
 		for layeridx in 0..self.get_layer_config().len()-1 {
 			// in + out * ins
 			let layer = &self.weightmats[layeridx];
-			let biases = &self.biases[layeridx];
-			let inputs = self.get_layer_config()[layeridx];
 			let outputs = self.get_layer_config()[layeridx + 1];
-			let last_ref = &last;
-			let n_threads = thread::available_parallelism()
-				.map(|n| n.get())
-				.unwrap_or(4);
-			let chunk_size = (outputs + n_threads - 1) / n_threads;
-			let mut sums = vec![0.0f32; outputs];
-			thread::scope(|scope| {
-				let mut handles = Vec::new();
-		        for chunk_start in (0..outputs).step_by(chunk_size.max(1)) {
-            		let chunk_end = (chunk_start + chunk_size).min(outputs);
-					
-					handles.push(scope.spawn(move || {
-             			let mut local = Vec::with_capacity(chunk_end - chunk_start);
-                		for outidx in chunk_start..chunk_end {
-							let mut sum = biases[outidx];
-
-							for inidx in 0..inputs {
-								sum += layer[outidx + inidx *outputs] * last_ref[inidx];
-							}
-
-							local.push(sum);
-						}
-						return (chunk_start, local);
-					}));
-				}
-				for handle in handles {
-					let (start, local) = handle.join().unwrap();
-					sums[start..start + local.len()].copy_from_slice(&local);
-				}
-			});
-			last = acts[layeridx].activate(&sums);
+			let modulation: f32 = self.bias_modulation[layeridx];
+			let mut sums: Vec<f32> = self.biases[layeridx].iter().map(|x| x * modulation).collect();
+			for outidx in 0..outputs {
+				sums
+					.iter_mut()
+					.enumerate()
+					.for_each(|(inidx, sum)|
+						sum.add_assign(layer[outidx + inidx * outputs] * last[inidx])
+					);
+				
+			}
+			last = self.acts[layeridx].activate(&sums);
 		}
 		return last;
 	}
 }
 
 impl BackPropogation<NeuralNetworkInternal, NeuralNetworkGradients> for NeuralNetwork {
-	fn backpropogation(&self, activations: &[Box<dyn Activation>], input: &[f32], expected: &[f32]) -> (Vec<f32>, NeuralNetworkGradients) {
+	fn backpropogation(&self, input: &[f32], expected: &[f32]) -> (Vec<f32>, NeuralNetworkGradients) {
 		let mut gradients: NeuralNetworkGradients = NeuralNetworkGradients::new(self.get_layer_config());
 		let mut deltas: Vec<Vec<f32>> = self.layerconfig[1..]
 			.iter()
 			.map(|&n| vec![0.0; n])
 			.collect();
-		let internal = self.forward_internal(activations, input);
+		let internal = self.forward_internal(input);
 		let weightmatcount = self.weightmats.len();
 		let mut derivs: Vec<f32>;
 		// #1 Last layer
 		let weightmatlast = weightmatcount - 1;
-		let acts = activations[weightmatlast].activate(&internal.layers[weightmatcount]);
-		if !activations[weightmatlast].vector_derivate(&acts, expected, &mut deltas[weightmatlast]) {
+		let acts = self.acts[weightmatlast].activate(&internal.layers[weightmatcount]);
+		if !self.acts[weightmatlast].vector_derivate(&acts, expected, &mut deltas[weightmatlast]) {
 			derivs = vec![0f32;internal.layers[weightmatlast].len()];
-			activations[weightmatlast].derivate( &internal.layers[weightmatcount], &mut derivs);
+			self.acts[weightmatlast].derivate( &internal.layers[weightmatcount], &mut derivs);
 			for outidx in 0..internal.layers[weightmatcount].len() {
 				let error = internal.layers[weightmatcount][outidx] - expected[outidx];
-				match activations[weightmatlast].get_loss_type() {
+				match self.acts[weightmatlast].get_loss_type() {
 					LossType::Square => deltas[weightmatlast][outidx] = error * derivs[outidx],
 					LossType::CrossEntropy => deltas[weightmatlast][outidx] = error,
 				}
@@ -347,7 +284,7 @@ impl BackPropogation<NeuralNetworkInternal, NeuralNetworkGradients> for NeuralNe
 			let inputs = self.get_layer_config()[layeridx + 1]; 
 			let outputs = self.get_layer_config()[layeridx + 2];
 			derivs = vec![0f32;internal.layers[layeridx + 1].len()];
-			activations[layeridx].derivate(&internal.layers[layeridx + 1], &mut derivs);
+			self.acts[layeridx].derivate(&internal.layers[layeridx + 1], &mut derivs);
 			for inidx in 0..inputs {
 				let mut sum = 0.0f32;
 				for outidx in 0..outputs {

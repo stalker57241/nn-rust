@@ -1,7 +1,7 @@
-use nn320::{ff::Activation, io::{NeuralNetworkPair, IONeural}, mnist_minimal_required::*, neuro::GetLoss};
+use nn320::{ff::Activation, io::IONeural, mnist_minimal_required::*, neuro::GetLoss};
 
 const LEARNRATE: f32 = 0.15;
-const EPOCHS: usize = 14;
+const EPOCHS: usize = 7;
 const BATCH_SIZE: usize = 10;
 
 const TRAIN_IMAGES_PATH: &'static str = "mnist/train-images-idx3-ubyte";
@@ -27,11 +27,14 @@ fn main() -> Result<(), std::io::Error> {
 	) = load_images(T10K_IMAGES_PATH, T10K_LABELS_PATH);
 	assert_eq!(train_classes, test_classes, "TRAIN AND TEST CASES IS DIFFERENT");
 	println!("Dataset loaded!");
-	let layerconfig = vec![train_image_size, 128, train_classes];
+	let layerconfig = vec![train_image_size, 512, 128, train_classes];
+	let acts: Vec<Box<dyn Activation>> = vec![Box::from(SIGMOID), Box::from(SIGMOID), Box::from(SOFTMAX)];
+	
 	let name: String = format!("mnist_{}_LR{LEARNRATE}.mdl", layerconfig.iter().map(|x| return x.to_string()).collect::<Vec<String>>().join("_"));
-	let acts: Vec<Box<dyn Activation>> = vec![Box::from(SIGMOID), Box::from(SOFTMAX)];
-    let (mut network, acts) = NeuralNetworkPair::load(name.clone()).unwrap_or(
-		(NeuralNetwork::new(&layerconfig, LEARNRATE), acts)
+	
+    
+	let mut network = NeuralNetwork::load(name.clone()).unwrap_or(
+		NeuralNetwork::new(acts, &layerconfig, LEARNRATE)
 	);
 	// let acts: Vec<Box<dyn Activation>> = ;
 	// let losstype = acts.get_loss();
@@ -46,9 +49,9 @@ fn main() -> Result<(), std::io::Error> {
 		for n in 0..train_num_images {
 			let input: Vec<f32> = train_images[n * train_image_size..(n+1) * train_image_size].to_vec();
 			let expected = one_hot(train_label_raw[n], train_classes);
-			let (outs, mut gradients) = network.backpropogation(&acts, &input, &expected);
+			let (outs, mut gradients) = network.backpropogation(&input, &expected);
 			total_loss += outs.loss_cost(
-				acts.get_loss(),
+				network.get_loss(),
 				&expected
 			);
 			if gradients.count == BATCH_SIZE {
@@ -62,7 +65,7 @@ fn main() -> Result<(), std::io::Error> {
 			let mut total_loss = 0.0f32;
 			for n in 0..test_num_images {
 				let input = test_images[n * test_image_size..(n + 1) * test_image_size].to_vec();
-				let out = network.forward(&acts, &input);
+				let out = network.forward(&input);
 				let expected = one_hot(test_label_raw[n], train_classes);
 				for k in 0..train_classes {
 					total_loss -= expected[k] * (out[k] + 1e-7).ln();
@@ -86,7 +89,7 @@ fn main() -> Result<(), std::io::Error> {
 	let mut total_loss = 0.0f32;
 	for n in 0..test_num_images {
 		let input = test_images[n * test_image_size..(n + 1) * test_image_size].to_vec();
-		let out = network.forward(&acts, &input);
+		let out = network.forward(&input);
 		let expected = one_hot(test_label_raw[n], train_classes);
 		for k in 0..train_classes {
 			// let d = out[k] - expected[k];
@@ -106,6 +109,6 @@ fn main() -> Result<(), std::io::Error> {
 	println!("T10K loss={0}", total_loss / test_num_images as f32);
 	println!("T10K accuracy: {:.2}%", 100.0 * correct as f32 / test_num_images as f32);
 
-	(network, acts).store(name.clone()).unwrap();
+	network.store(name.clone()).unwrap();
 	Ok(())
 }
