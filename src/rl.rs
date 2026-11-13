@@ -51,7 +51,7 @@ use crate::{ff::{BackPropogation, FeedForward}, neuro::{Generator, NeuralNetwork
             for (dst, src) in self.weightmats.iter_mut().zip(other.weightmats.iter()) {
                 dst.as_mut_slice().copy_from_slice(src.as_slice());
             }
-            for (dst, src) in self.biases.iter_mut().zip(other.weightmats.iter()) {
+            for (dst, src) in self.biases.iter_mut().zip(other.biases.iter()) {
                 dst.copy_from_slice(src);
             }
         }
@@ -147,7 +147,7 @@ use crate::{ff::{BackPropogation, FeedForward}, neuro::{Generator, NeuralNetwork
 pub mod capi {
     use std::{os::raw::c_float, ptr::null_mut};
 
-use crate::{neuro::{LayerConfig, NeuralNetwork}, rl::{DQN, EpsilonGreedy}};
+use crate::{neuro::{LayerConfig, NeuralNetwork}, rl::{DQN, EpsilonGreedy, Transition}};
 
     #[unsafe(no_mangle)]
     pub extern "C" fn makePolicy(epsilon: c_float, min_epsilon: c_float, decay: c_float) -> *mut EpsilonGreedy {
@@ -158,9 +158,9 @@ use crate::{neuro::{LayerConfig, NeuralNetwork}, rl::{DQN, EpsilonGreedy}};
         if network.is_null() || policy.is_null() {
             return null_mut();
         }
-        let network = unsafe {network.read()};
-        let policy = unsafe {policy.read()};
-        let dqn = DQN::new(network, policy, capacity);
+        let network = unsafe { Box::from_raw(network)};
+        let policy = unsafe {Box::from_raw(policy)};
+        let dqn = DQN::new(*network, *policy, capacity);
         return Box::into_raw(Box::new(dqn));
     }
     #[unsafe(no_mangle)]
@@ -176,7 +176,45 @@ use crate::{neuro::{LayerConfig, NeuralNetwork}, rl::{DQN, EpsilonGreedy}};
         if dqn.is_null() {
             return;
         }
-        unsafe { &mut *dqn }.train_step(batch_size);
+        unsafe { Box::from_raw(dqn) }.train_step(batch_size);
+    }
+    #[unsafe(no_mangle)]
+    pub extern "C" fn dqnRemember(
+        dqn: *mut DQN<NeuralNetwork, EpsilonGreedy>,
+        state: *const c_float,
+        action: usize,
+        reward: c_float,
+        next_state: *const c_float,
+        done: bool
+    ) {
+        if dqn.is_null() || state.is_null() || next_state.is_null() {
+            return;
+        }
+
+        let dqn = unsafe { &mut *dqn };
+        let input_size = dqn.network.get_layer_config()[0];
+        let state = unsafe { std::slice::from_raw_parts(state, input_size) }.to_vec();
+        let next_state= unsafe { std::slice::from_raw_parts(next_state, input_size) }.to_vec();
+        let transition = Transition {
+            state,
+            next_state,
+            action,
+            done,
+            reward
+        };
+        if dqn.memory.buffer.len() < dqn.memory.capacity {
+            dqn.memory.buffer.push(transition);
+        } else {
+            dqn.memory.buffer[dqn.memory.position] = transition;
+            dqn.memory.position = (dqn.memory.position + 1) % dqn.memory.capacity;
+        }
+    }
+    #[unsafe(no_mangle)]
+    pub extern "C" fn dqnTerminate(dqn: *mut DQN<NeuralNetwork, EpsilonGreedy>) {
+        if dqn.is_null() { return; }
+        unsafe {
+            drop(Box::from_raw(dqn));
+        }
     }
 }
 
